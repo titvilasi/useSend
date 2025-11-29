@@ -11,10 +11,14 @@ export default function ReSubscribe({
   id,
   hash,
   contact,
+  contactBookId,
+  list,
 }: {
   id: string;
   hash: string;
   contact: Contact;
+  contactBookId?: string;
+  list?: string;
 }) {
   const [subscribed, setSubscribed] = useState(false);
 
@@ -44,7 +48,14 @@ export default function ReSubscribe({
         {!subscribed ? (
           <Button
             className="mx-auto w-[150px]"
-            onClick={() => reSubscribe.mutate({ id, hash })}
+            onClick={() =>
+              reSubscribe.mutate({
+                id,
+                hash,
+                contactBookId,
+                list,
+              })
+            }
             disabled={reSubscribe.isPending}
           >
             {reSubscribe.isPending ? (

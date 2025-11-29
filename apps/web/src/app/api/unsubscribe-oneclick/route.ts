@@ -7,6 +7,8 @@ export async function POST(request: NextRequest) {
     const url = new URL(request.url);
     const id = url.searchParams.get("id");
     const hash = url.searchParams.get("hash");
+    const contactBookId = url.searchParams.get("contactBookId") ?? undefined;
+    const list = url.searchParams.get("list") ?? undefined;
 
     if (!id || !hash) {
       logger.warn(
@@ -19,10 +21,20 @@ export async function POST(request: NextRequest) {
     }
 
     // Process the unsubscribe using existing logic
-    const contact = await unsubscribeContactFromLink(id, hash);
+    const contact = await unsubscribeContactFromLink(
+      id,
+      hash,
+      contactBookId ?? undefined,
+      list ?? undefined
+    );
 
     logger.info(
-      { contactId: contact.id, campaignId: id.split("-")[1] },
+      {
+        contactId: contact.id,
+        campaignId: id.split("-")[1],
+        contactBookId,
+        list,
+      },
       "One-click unsubscribe successful"
     );
 

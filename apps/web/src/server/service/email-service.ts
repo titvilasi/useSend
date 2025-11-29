@@ -10,7 +10,7 @@ import { EmailRenderer } from "@usesend/email-editor/src/renderer";
 import { logger } from "../logger/log";
 import { SuppressionService } from "./suppression-service";
 import { sanitizeCustomHeaders } from "~/server/utils/email-headers";
-import { Prisma } from "@prisma/client";
+import { createContactBookUnsubUrl } from "./campaign-service";
 
 async function checkIfValidEmail(emailId: string) {
   const email = await db.email.findUnique({
@@ -40,14 +40,189 @@ async function checkIfValidEmail(emailId: string) {
 
 export const replaceVariables = (
   text: string,
-  variables: Record<string, string>
-) => {
-  return Object.keys(variables).reduce((accum, key) => {
-    const re = new RegExp(`{{${key}}}`, "g");
-    const returnTxt = accum.replace(re, variables[key] as string);
-    return returnTxt;
-  }, text);
+  variables: Record<string, string | undefined>
+) => replaceTemplatePlaceholders(text ?? "", variables);
+
+type TemplateRenderData = {
+  subject: string;
+  renderer?: EmailRenderer;
+  html?: string | null;
 };
+
+function normalizeTemplateVariables(
+  variables?: Record<string, string | undefined>
+) {
+  return Object.entries(variables ?? {}).reduce(
+    (acc, [key, value]) => {
+      const normalizedKey = key
+        .replace(/^\{\{\s*/, "")
+        .replace(/\s*\}\}$/, "")
+        .trim();
+      acc[normalizedKey] = value ?? "";
+      return acc;
+    },
+    {} as Record<string, string>
+  );
+}
+
+function buildRendererVariableValues(
+  variables?: Record<string, string | undefined>
+) {
+  const normalizedVariables = normalizeTemplateVariables(variables);
+  return {
+    ...normalizedVariables,
+    ...Object.entries(normalizedVariables).reduce(
+      (acc, [key, value]) => {
+        acc[`{{${key}}}`] = value;
+        return acc;
+      },
+      {} as Record<string, string>
+    ),
+  };
+}
+
+function replaceTemplatePlaceholders(
+  content: string,
+  variables?: Record<string, string | undefined>
+) {
+  const normalizedVariables = normalizeTemplateVariables(variables);
+  return Object.entries(normalizedVariables).reduce((acc, [key, value]) => {
+    const re = new RegExp(`\\{\\{\\s*${key}\\s*\\}\\}`, "gi");
+    return acc.replace(re, value);
+  }, content);
+}
+
+function getTemplateRenderData(template: {
+  id?: string;
+  subject: string | null;
+  content: string | null;
+  html: string | null;
+}): TemplateRenderData {
+  if (template.content) {
+    try {
+      const parsedContent = JSON.parse(template.content);
+      return {
+        subject: template.subject || "",
+        renderer: new EmailRenderer(parsedContent),
+        html: template.html,
+      };
+    } catch (error) {
+      logger.error(
+        { err: error, templateId: template.id },
+        "Failed to parse template content"
+      );
+    }
+  }
+
+  return {
+    subject: template.subject || "",
+    html: template.html,
+  };
+}
+
+async function renderTemplateHtml(
+  templateData: TemplateRenderData,
+  variables?: Record<string, string | undefined>
+) {
+  if (templateData.renderer) {
+    return templateData.renderer.render({
+      shouldReplaceVariableValues: true,
+      variableValues: buildRendererVariableValues(variables),
+    });
+  }
+
+  if (templateData.html !== undefined && templateData.html !== null) {
+    return replaceTemplatePlaceholders(templateData.html, variables);
+  }
+
+  return undefined;
+}
+
+async function getTemplateRenderDataById(
+  templateId: string,
+  cache?: Map<string, TemplateRenderData>
+) {
+  const cacheKey = templateId;
+
+  if (cache?.has(cacheKey)) {
+    return cache.get(cacheKey);
+  }
+
+  const template = await db.template.findUnique({
+    where: { id: templateId },
+  });
+
+  if (!template) {
+    return undefined;
+  }
+
+  const templateData = getTemplateRenderData(template);
+  cache?.set(cacheKey, templateData);
+
+  return templateData;
+}
+
+const DEFAULT_SUBSCRIPTION_LIST = "default";
+const DEFAULT_CONTACT_BOOK_NAME = "Transactional Contacts";
+
+async function getOrCreateContactBookForList(
+  teamId: number,
+  list?: string
+) {
+  const targetName = list?.trim() || DEFAULT_CONTACT_BOOK_NAME;
+
+  const existing = await db.contactBook.findFirst({
+    where: { teamId, name: targetName },
+  });
+
+  if (existing) {
+    return existing;
+  }
+
+  const fallback = await db.contactBook.findFirst({
+    where: { teamId },
+    orderBy: { createdAt: "asc" },
+  });
+
+  if (fallback) {
+    return fallback;
+  }
+
+  return db.contactBook.create({
+    data: {
+      name: targetName,
+      teamId,
+      properties: {},
+    },
+  });
+}
+
+async function getOrCreateContactForEmail(
+  contactBookId: string,
+  email: string
+) {
+  const existing = await db.contact.findUnique({
+    where: {
+      contactBookId_email: {
+        contactBookId,
+        email,
+      },
+    },
+  });
+
+  if (existing) {
+    return existing;
+  }
+
+  return db.contact.create({
+    data: {
+      contactBookId,
+      email,
+      properties: {},
+      subscribed: true,
+    },
+  });
+}
 
 /**
  Send transactional email
@@ -72,11 +247,30 @@ export async function sendEmail(
     apiKeyId,
     inReplyToId,
     headers,
+    unsubUrl: unsubUrlFromApi,
+    subscriptionList,
   } = emailContent;
   let subject = subjectFromApiCall;
   let html = htmlFromApiCall;
 
   let domain: Awaited<ReturnType<typeof validateDomainFromEmail>>;
+  const normalizedVariables = normalizeTemplateVariables(variables);
+  const normalizedList = subscriptionList?.trim() || DEFAULT_SUBSCRIPTION_LIST;
+  const primaryRecipient = Array.isArray(to) ? to[0] : to;
+
+  let contactBook:
+    | {
+        id: string;
+      }
+    | null = null;
+  let contact:
+    | {
+        id: string;
+        subscribed: boolean;
+        email: string;
+      }
+    | null = null;
+  let unsubUrl = unsubUrlFromApi;
 
   // If this is an API call with an API key, validate domain access
   if (apiKeyId) {
@@ -103,6 +297,22 @@ export async function sendEmail(
   const ccEmails = cc ? (Array.isArray(cc) ? cc : [cc]) : [];
   const bccEmails = bcc ? (Array.isArray(bcc) ? bcc : [bcc]) : [];
 
+  if (primaryRecipient) {
+    contactBook = await getOrCreateContactBookForList(teamId, normalizedList);
+    contact = await getOrCreateContactForEmail(
+      contactBook.id,
+      primaryRecipient
+    );
+
+    if (!unsubUrl) {
+      unsubUrl = createContactBookUnsubUrl({
+        contactId: contact.id,
+        contactBookId: contactBook.id,
+        list: normalizedList,
+      });
+    }
+  }
+
   // Collect all unique emails to check for suppressions
   const allEmailsToCheck = [
     ...new Set([...toEmails, ...ccEmails, ...bccEmails]),
@@ -112,6 +322,10 @@ export async function sendEmail(
     allEmailsToCheck,
     teamId
   );
+
+  if (contact && primaryRecipient && !contact.subscribed) {
+    suppressionResults[primaryRecipient] = true;
+  }
 
   // Filter each field separately
   const filteredToEmails = toEmails.filter(
@@ -188,34 +402,29 @@ export async function sendEmail(
     );
   }
 
+  const renderVariables = {
+    ...normalizedVariables,
+    unsubscribeUrl: unsubUrl ?? "",
+    unsunscribeUrl: unsubUrl ?? "",
+  };
+
   if (templateId) {
     const template = await db.template.findUnique({
       where: { id: templateId },
     });
 
     if (template) {
-      const jsonContent = JSON.parse(template.content || "{}");
-      const renderer = new EmailRenderer(jsonContent);
-
-      subject = replaceVariables(template.subject || "", variables || {});
-
-      // {{}} for link replacements
-      const modifiedVariables = {
-        ...variables,
-        ...Object.keys(variables || {}).reduce(
-          (acc, key) => {
-            acc[`{{${key}}}`] = variables?.[key] || "";
-            return acc;
-          },
-          {} as Record<string, string>
-        ),
-      };
-
-      html = await renderer.render({
-        shouldReplaceVariableValues: true,
-        variableValues: modifiedVariables,
-      });
+      const templateData = getTemplateRenderData(template);
+      subject = replaceVariables(template.subject || "", renderVariables);
+      html =
+        (await renderTemplateHtml(templateData, renderVariables)) ?? html;
     }
+  }
+
+  subject = replaceTemplatePlaceholders(subject ?? "", renderVariables);
+
+  if (html) {
+    html = replaceTemplatePlaceholders(html, renderVariables);
   }
 
   if (inReplyToId) {
@@ -268,6 +477,7 @@ export async function sendEmail(
       apiId: apiKeyId,
       inReplyToId,
       headers: headers ? JSON.stringify(headers) : undefined,
+      contactId: contact?.id,
     },
   });
 
@@ -277,7 +487,7 @@ export async function sendEmail(
       teamId,
       domain.region,
       true,
-      undefined,
+      unsubUrl,
       delay
     );
   } catch (error: any) {
@@ -493,38 +703,19 @@ export async function sendBulkEmails(
 
     let subject = subjectFromApiCall;
     let html = htmlFromApiCall;
+    const normalizedVariables = normalizeTemplateVariables(variables);
 
     // Validate domain for suppressed email too
     const domain = await validateDomainFromEmail(from, teamId);
 
     // Process template if specified
     if (templateId) {
-      const template = await db.template.findUnique({
-        where: { id: templateId },
-      });
+      const templateData = await getTemplateRenderDataById(templateId);
 
-      if (template) {
-        const jsonContent = JSON.parse(template.content || "{}");
-        const renderer = new EmailRenderer(jsonContent);
-
-        subject = replaceVariables(template.subject || "", variables || {});
-
-        // {{}} for link replacements
-        const modifiedVariables = {
-          ...variables,
-          ...Object.keys(variables || {}).reduce(
-            (acc, key) => {
-              acc[`{{${key}}}`] = variables?.[key] || "";
-              return acc;
-            },
-            {} as Record<string, string>
-          ),
-        };
-
-        html = await renderer.render({
-          shouldReplaceVariableValues: true,
-          variableValues: modifiedVariables,
-        });
+      if (templateData) {
+        subject = replaceVariables(templateData.subject, normalizedVariables);
+        html =
+          (await renderTemplateHtml(templateData, normalizedVariables)) ?? html;
       }
     }
 
@@ -611,10 +802,7 @@ export async function sendBulkEmails(
   }
 
   // Cache templates to avoid repeated database queries
-  const templateCache = new Map<
-    number,
-    { subject: string; content: any; renderer: EmailRenderer }
-  >();
+  const templateCache = new Map<string, TemplateRenderData>();
 
   const createdEmails = [];
   const queueJobs = [];
@@ -648,44 +836,23 @@ export async function sendBulkEmails(
 
       let subject = subjectFromApiCall;
       let html = htmlFromApiCall;
+      const normalizedVariables = normalizeTemplateVariables(variables);
 
       // Process template if specified
       if (templateId) {
-        let templateData = templateCache.get(Number(templateId));
-        if (!templateData) {
-          const template = await db.template.findUnique({
-            where: { id: templateId },
-          });
-          if (template) {
-            const jsonContent = JSON.parse(template.content || "{}");
-            templateData = {
-              subject: template.subject || "",
-              content: jsonContent,
-              renderer: new EmailRenderer(jsonContent),
-            };
-            templateCache.set(Number(templateId), templateData);
-          }
-        }
+        const templateData = await getTemplateRenderDataById(
+          templateId,
+          templateCache
+        );
 
         if (templateData) {
-          subject = replaceVariables(templateData.subject, variables || {});
-
-          // {{}} for link replacements
-          const modifiedVariables = {
-            ...variables,
-            ...Object.keys(variables || {}).reduce(
-              (acc, key) => {
-                acc[`{{${key}}}`] = variables?.[key] || "";
-                return acc;
-              },
-              {} as Record<string, string>
-            ),
-          };
-
-          html = await templateData.renderer.render({
-            shouldReplaceVariableValues: true,
-            variableValues: modifiedVariables,
-          });
+          subject = replaceVariables(
+            templateData.subject,
+            normalizedVariables
+          );
+          html =
+            (await renderTemplateHtml(templateData, normalizedVariables)) ??
+            html;
         }
       }
 

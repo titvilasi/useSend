@@ -78,25 +78,36 @@ export const templateRouter = createTRPCRouter({
         name: z.string().optional(),
         subject: z.string().optional(),
         content: z.string().optional(),
+        html: z.string().optional(),
       }),
     )
     .mutation(async ({ ctx: { db }, input }) => {
-      const { templateId, ...data } = input;
-      let html: string | null = null;
+      const { templateId, html: htmlInput, ...data } = input;
+      let htmlToSave: string | undefined;
 
       if (data.content) {
         const jsonContent = data.content ? JSON.parse(data.content) : null;
 
         const renderer = new EmailRenderer(jsonContent);
-        html = await renderer.render();
+        htmlToSave = await renderer.render();
+      } else if (htmlInput !== undefined) {
+        htmlToSave = htmlInput;
+      }
+
+      const templateUpdateData: Prisma.TemplateUpdateInput = {
+        ...data,
+      };
+
+      if (htmlToSave !== undefined) {
+        templateUpdateData.html = htmlToSave;
+        if (!data.content) {
+          templateUpdateData.content = null;
+        }
       }
 
       const template = await db.template.update({
         where: { id: templateId },
-        data: {
-          ...data,
-          html,
-        },
+        data: templateUpdateData,
       });
       return template;
     }),
@@ -111,7 +122,7 @@ export const templateRouter = createTRPCRouter({
   ),
 
   getTemplate: templateProcedure.query(async ({ ctx: { db, team }, input }) => {
-    const template = await db.template.findUnique({
+    let template = await db.template.findUnique({
       where: { id: input.templateId, teamId: team.id },
     });
 
@@ -120,6 +131,19 @@ export const templateRouter = createTRPCRouter({
         code: "BAD_REQUEST",
         message: "Template not found",
       });
+    }
+
+    if (!template.html && template.content) {
+      try {
+        const renderer = new EmailRenderer(JSON.parse(template.content));
+        const html = await renderer.render();
+        template = await db.template.update({
+          where: { id: input.templateId, teamId: team.id },
+          data: { html },
+        });
+      } catch (error) {
+        console.error("Failed to render template html", error);
+      }
     }
 
     const imageUploadSupported = isStorageConfigured();
@@ -137,6 +161,7 @@ export const templateRouter = createTRPCRouter({
           name: `${template.name} (Copy)`,
           subject: template.subject,
           content: template.content,
+          html: template.html,
           teamId: team.id,
         },
       });

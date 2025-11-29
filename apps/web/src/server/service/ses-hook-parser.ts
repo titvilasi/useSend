@@ -1,6 +1,5 @@
 import {
   EmailStatus,
-  Prisma,
   UnsubscribeReason,
   SuppressionReason,
 } from "@prisma/client";

@@ -231,10 +231,17 @@ export const campaignRouter = createTRPCRouter({
       z.object({
         id: z.string(),
         hash: z.string(),
+        contactBookId: z.string().optional(),
+        list: z.string().optional(),
       }),
     )
     .mutation(async ({ input }) => {
-      await campaignService.subscribeContact(input.id, input.hash);
+      await campaignService.subscribeContact(
+        input.id,
+        input.hash,
+        input.contactBookId,
+        input.list,
+      );
     }),
 
   duplicateCampaign: campaignProcedure.mutation(

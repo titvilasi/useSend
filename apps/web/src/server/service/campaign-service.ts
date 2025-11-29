@@ -553,17 +553,51 @@ export function createOneClickUnsubUrl(contactId: string, campaignId: string) {
   return `${env.NEXTAUTH_URL}/api/unsubscribe-oneclick?id=${unsubId}&hash=${unsubHash}`;
 }
 
-export async function unsubscribeContactFromLink(id: string, hash: string) {
+export function createContactBookUnsubUrl({
+  contactId,
+  contactBookId,
+  list,
+}: {
+  contactId: string;
+  contactBookId: string;
+  list?: string;
+}) {
+  const unsubId = contactId;
+  const listName = list?.trim() || "default";
+
+  const unsubHash = createHash("sha256")
+    .update(`${unsubId}-${contactBookId}-${listName}-${env.NEXTAUTH_SECRET}`)
+    .digest("hex");
+
+  const params = new URLSearchParams({
+    id: unsubId,
+    hash: unsubHash,
+    contactBookId,
+    list: listName,
+  });
+
+  return `${env.NEXTAUTH_URL}/unsubscribe?${params.toString()}`;
+}
+
+export async function unsubscribeContactFromLink(
+  id: string,
+  hash: string,
+  contactBookId?: string,
+  list?: string
+) {
   const [contactId, campaignId] = id.split("-");
 
-  if (!contactId || !campaignId) {
+  if (!contactId) {
     throw new Error("Invalid unsubscribe link");
   }
 
-  // Verify the hash
-  const expectedHash = createHash("sha256")
-    .update(`${id}-${env.NEXTAUTH_SECRET}`)
-    .digest("hex");
+  const listName = list?.trim() || "default";
+
+  const expectedHash = contactBookId
+    ? createHash("sha256")
+        .update(`${id}-${contactBookId}-${listName}-${env.NEXTAUTH_SECRET}`)
+        .digest("hex")
+    : createHash("sha256").update(`${id}-${env.NEXTAUTH_SECRET}`).digest("hex");
 
   if (hash !== expectedHash) {
     throw new Error("Invalid unsubscribe link");
@@ -573,6 +607,8 @@ export async function unsubscribeContactFromLink(id: string, hash: string) {
     contactId,
     campaignId,
     reason: UnsubscribeReason.UNSUBSCRIBED,
+    contactBookId,
+    list: listName,
   });
 }
 
@@ -580,12 +616,15 @@ export async function unsubscribeContact({
   contactId,
   campaignId,
   reason,
+  contactBookId,
+  list,
 }: {
   contactId: string;
   campaignId?: string;
   reason: UnsubscribeReason;
+  contactBookId?: string;
+  list?: string;
 }) {
-  // Update the contact's subscription status
   try {
     const contact = await db.contact.findUnique({
       where: { id: contactId },
@@ -595,21 +634,42 @@ export async function unsubscribeContact({
       throw new Error("Contact not found");
     }
 
+    if (contactBookId && contact.contactBookId !== contactBookId) {
+      throw new Error("Invalid unsubscribe link");
+    }
+
     if (contact.subscribed) {
       await db.contact.update({
         where: { id: contactId },
-        data: { subscribed: false, unsubscribeReason: reason },
+        data: {
+          subscribed: false,
+          unsubscribeReason: reason,
+          properties: {
+            ...(contact.properties || {}),
+            subscriptions: {
+              ...(contact.properties as Record<string, unknown>)?.subscriptions,
+              [list ?? "default"]: false,
+            },
+          },
+        },
       });
 
       if (campaignId) {
-        await db.campaign.update({
+        const existingCampaign = await db.campaign.findUnique({
           where: { id: campaignId },
-          data: {
-            unsubscribed: {
-              increment: 1,
-            },
-          },
+          select: { id: true },
         });
+
+        if (existingCampaign) {
+          await db.campaign.update({
+            where: { id: campaignId },
+            data: {
+              unsubscribed: {
+                increment: 1,
+              },
+            },
+          });
+        }
       }
     }
 
@@ -620,23 +680,30 @@ export async function unsubscribeContact({
   }
 }
 
-export async function subscribeContact(id: string, hash: string) {
+export async function subscribeContact(
+  id: string,
+  hash: string,
+  contactBookId?: string,
+  list?: string
+) {
   const [contactId, campaignId] = id.split("-");
 
-  if (!contactId || !campaignId) {
+  if (!contactId) {
     throw new Error("Invalid subscribe link");
   }
 
-  // Verify the hash
-  const expectedHash = createHash("sha256")
-    .update(`${id}-${env.NEXTAUTH_SECRET}`)
-    .digest("hex");
+  const listName = list?.trim() || "default";
+
+  const expectedHash = contactBookId
+    ? createHash("sha256")
+        .update(`${id}-${contactBookId}-${listName}-${env.NEXTAUTH_SECRET}`)
+        .digest("hex")
+    : createHash("sha256").update(`${id}-${env.NEXTAUTH_SECRET}`).digest("hex");
 
   if (hash !== expectedHash) {
     throw new Error("Invalid subscribe link");
   }
 
-  // Update the contact's subscription status
   try {
     const contact = await db.contact.findUnique({
       where: { id: contactId },
@@ -646,20 +713,42 @@ export async function subscribeContact(id: string, hash: string) {
       throw new Error("Contact not found");
     }
 
+    if (contactBookId && contact.contactBookId !== contactBookId) {
+      throw new Error("Invalid subscribe link");
+    }
+
     if (!contact.subscribed) {
       await db.contact.update({
         where: { id: contactId },
-        data: { subscribed: true },
-      });
-
-      await db.campaign.update({
-        where: { id: campaignId },
         data: {
-          unsubscribed: {
-            decrement: 1,
+          subscribed: true,
+          properties: {
+            ...(contact.properties || {}),
+            subscriptions: {
+              ...(contact.properties as Record<string, unknown>)?.subscriptions,
+              [listName]: true,
+            },
           },
         },
       });
+
+      if (campaignId) {
+        const existingCampaign = await db.campaign.findUnique({
+          where: { id: campaignId },
+          select: { id: true },
+        });
+
+        if (existingCampaign) {
+          await db.campaign.update({
+            where: { id: campaignId },
+            data: {
+              unsubscribed: {
+                decrement: 1,
+              },
+            },
+          });
+        }
+      }
     }
 
     return true;

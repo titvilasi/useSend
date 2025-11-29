@@ -3,8 +3,7 @@
 import { api } from "~/trpc/react";
 import { Spinner } from "@usesend/ui/src/spinner";
 import { Input } from "@usesend/ui/src/input";
-import { Editor } from "@usesend/email-editor";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Template } from "@prisma/client";
 import { toast } from "@usesend/ui/src/toaster";
 import { useDebouncedCallback } from "use-debounce";
@@ -12,6 +11,7 @@ import { formatDistanceToNow } from "date-fns";
 import { ArrowLeft } from "lucide-react";
 import Link from "next/link";
 import { use } from "react";
+import { EmailComposer } from "~/components/EmailComposer";
 const IMAGE_SIZE_LIMIT = 10 * 1024 * 1024;
 
 export default function EditTemplatePage({
@@ -62,30 +62,36 @@ function TemplateEditor({
 }) {
   const utils = api.useUtils();
 
-  const [json, setJson] = useState<Record<string, any> | undefined>(
-    template.content ? JSON.parse(template.content) : undefined,
-  );
   const [isSaving, setIsSaving] = useState(false);
   const [name, setName] = useState(template.name);
   const [subject, setSubject] = useState(template.subject);
+  const [html, setHtml] = useState(template.html ?? "");
 
   const updateTemplateMutation = api.template.updateTemplate.useMutation({
     onSuccess: () => {
       utils.template.getTemplate.invalidate();
       setIsSaving(false);
     },
+    onError: (error) => {
+      setIsSaving(false);
+      toast.error(error.message);
+    },
   });
   const getUploadUrl = api.template.generateImagePresignedUrl.useMutation();
 
-  function updateEditorContent() {
+  useEffect(() => {
+    setHtml(template.html ?? "");
+  }, [template.id]);
+
+  function updateEditorContent(nextHtml: string) {
     updateTemplateMutation.mutate({
       templateId: template.id,
-      content: JSON.stringify(json),
+      html: nextHtml,
     });
   }
 
   const deboucedUpdateTemplate = useDebouncedCallback(
-    updateEditorContent,
+    (nextHtml: string) => updateEditorContent(nextHtml),
     1000,
   );
 
@@ -196,21 +202,19 @@ function TemplateEditor({
           </div>
         </div>
 
-        <div className=" rounded-lg bg-gray-50 w-full sm:w-[700px] mx-auto p-4 sm:p-10">
-          <div className="w-full sm:w-[600px] mx-auto">
-            <Editor
-              initialContent={json}
-              onUpdate={(content) => {
-                setJson(content.getJSON());
-                setIsSaving(true);
-                deboucedUpdateTemplate();
-              }}
-              variables={["email", "firstName", "lastName"]}
-              uploadImage={
-                template.imageUploadSupported ? handleFileChange : undefined
-              }
-            />
-          </div>
+        <div className="w-full sm:w-[820px] mx-auto">
+          <EmailComposer
+            value={html}
+            onChange={(value) => {
+              setHtml(value);
+              setIsSaving(true);
+              deboucedUpdateTemplate(value);
+            }}
+            variables={["email", "firstName", "lastName"]}
+            onUploadImage={
+              template.imageUploadSupported ? handleFileChange : undefined
+            }
+          />
         </div>
       </div>
     </div>

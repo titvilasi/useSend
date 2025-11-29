@@ -12,6 +12,8 @@ async function UnsubscribePage({
 
   const id = params.id as string;
   const hash = params.hash as string;
+  const contactBookId = params.contactBookId as string | undefined;
+  const list = (params.list as string | undefined) ?? "default";
 
   if (!id || !hash) {
     return (
@@ -28,11 +30,17 @@ async function UnsubscribePage({
     );
   }
 
-  const contact = await unsubscribeContactFromLink(id, hash);
+  const contact = await unsubscribeContactFromLink(id, hash, contactBookId, list);
 
   return (
     <div className="min-h-screen flex items-center justify-center ">
-      <ReSubscribe id={id} hash={hash} contact={contact} />
+      <ReSubscribe
+        id={id}
+        hash={hash}
+        contact={contact}
+        contactBookId={contactBookId}
+        list={list}
+      />
 
       <div className=" fixed bottom-10  p-4">
         <p>
