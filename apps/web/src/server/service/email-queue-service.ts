@@ -1,4 +1,4 @@
-import { Job, Queue, Worker } from "bullmq";
+import { Queue, Worker } from "bullmq";
 import { env } from "~/env";
 import { EmailAttachment } from "~/types";
 import { convert as htmlToText } from "html-to-text";
@@ -10,7 +10,6 @@ import { DEFAULT_QUEUE_OPTIONS } from "../queue/queue-constants";
 import { logger } from "../logger/log";
 import { createWorkerHandler, TeamJob } from "../queue/bullmq-context";
 import { LimitService } from "./limit-service";
-import { sanitizeCustomHeaders } from "~/server/utils/email-headers";
 // Notifications about limits are handled inside LimitService.
 
 type QueueEmailJob = TeamJob<{

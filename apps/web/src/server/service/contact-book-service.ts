@@ -1,4 +1,4 @@
-import { CampaignStatus, type ContactBook } from "@prisma/client";
+import { CampaignStatus } from "@prisma/client";
 import { db } from "../db";
 import { LimitService } from "./limit-service";
 import { UnsendApiError } from "../public-api/api-error";

@@ -5,7 +5,7 @@ interface UpgradeModalStore {
   isOpen: boolean;
   reason?: LimitReason;
   action: {
-    openModal: (reason?: LimitReason) => void;
+    openModal: (modalReason?: LimitReason) => void;
     closeModal: () => void;
   };
 }
@@ -14,7 +14,8 @@ export const useUpgradeModalStore = create<UpgradeModalStore>((set) => ({
   isOpen: false,
   reason: undefined,
   action: {
-    openModal: (reason?: LimitReason) => set({ isOpen: true, reason }),
+    openModal: (modalReason?: LimitReason) =>
+      set({ isOpen: true, reason: modalReason }),
     closeModal: () => set({ isOpen: false, reason: undefined }),
   },
 }));

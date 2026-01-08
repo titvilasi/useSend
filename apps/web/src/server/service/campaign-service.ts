@@ -6,6 +6,7 @@ import {
   Campaign,
   Contact,
   EmailStatus,
+  Prisma,
   UnsubscribeReason,
 } from "@prisma/client";
 import { EmailQueueService } from "./email-queue-service";
@@ -553,6 +554,13 @@ export function createOneClickUnsubUrl(contactId: string, campaignId: string) {
   return `${env.NEXTAUTH_URL}/api/unsubscribe-oneclick?id=${unsubId}&hash=${unsubHash}`;
 }
 
+function toJsonObject(value: unknown): Prisma.InputJsonObject {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Prisma.InputJsonObject;
+  }
+  return {};
+}
+
 export function createContactBookUnsubUrl({
   contactId,
   contactBookId,
@@ -638,6 +646,11 @@ export async function unsubscribeContact({
       throw new Error("Invalid unsubscribe link");
     }
 
+    const properties = toJsonObject(contact.properties);
+    const subscriptions = toJsonObject(
+      (properties.subscriptions as Prisma.InputJsonObject) ?? {}
+    );
+
     if (contact.subscribed) {
       await db.contact.update({
         where: { id: contactId },
@@ -645,12 +658,12 @@ export async function unsubscribeContact({
           subscribed: false,
           unsubscribeReason: reason,
           properties: {
-            ...(contact.properties || {}),
+            ...properties,
             subscriptions: {
-              ...(contact.properties as Record<string, unknown>)?.subscriptions,
+              ...subscriptions,
               [list ?? "default"]: false,
             },
-          },
+          } as Prisma.InputJsonValue,
         },
       });
 
@@ -713,6 +726,11 @@ export async function subscribeContact(
       throw new Error("Contact not found");
     }
 
+    const properties = toJsonObject(contact.properties);
+    const subscriptions = toJsonObject(
+      (properties.subscriptions as Prisma.InputJsonObject) ?? {}
+    );
+
     if (contactBookId && contact.contactBookId !== contactBookId) {
       throw new Error("Invalid subscribe link");
     }
@@ -723,12 +741,12 @@ export async function subscribeContact(
         data: {
           subscribed: true,
           properties: {
-            ...(contact.properties || {}),
+            ...properties,
             subscriptions: {
-              ...(contact.properties as Record<string, unknown>)?.subscriptions,
+              ...subscriptions,
               [listName]: true,
             },
-          },
+          } as Prisma.InputJsonValue,
         },
       });
 

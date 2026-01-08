@@ -9,7 +9,6 @@ import {
 import { EmailRenderer } from "@usesend/email-editor/src/renderer";
 import { logger } from "../logger/log";
 import { SuppressionService } from "./suppression-service";
-import { sanitizeCustomHeaders } from "~/server/utils/email-headers";
 import { createContactBookUnsubUrl } from "./campaign-service";
 
 async function checkIfValidEmail(emailId: string) {
@@ -684,7 +683,6 @@ export async function sendBulkEmails(
     if (!originalContent) continue;
 
     const {
-      to,
       from,
       subject: subjectFromApiCall,
       templateId,
@@ -694,8 +692,6 @@ export async function sendBulkEmails(
       teamId,
       attachments,
       replyTo,
-      cc,
-      bcc,
       scheduledAt,
       apiKeyId,
       inReplyToId,
