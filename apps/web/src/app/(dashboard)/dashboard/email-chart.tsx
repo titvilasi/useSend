@@ -139,7 +139,9 @@ export default function EmailChart({ days, domain }: EmailChartProps) {
               {/* <YAxis fontSize={12} className="font-mono" /> */}
               <Tooltip
                 content={({ payload }) => {
-                  const data = payload?.[0]?.payload as Record<
+                  if (!payload || payload.length === 0) return null;
+
+                  const data = payload[0]?.payload as Record<
                     | "sent"
                     | "delivered"
                     | "opened"
@@ -149,7 +151,16 @@ export default function EmailChart({ days, domain }: EmailChartProps) {
                     number
                   > & { date: string };
 
-                  if (!data || data.sent === 0) return null;
+                  if (!data) return null;
+
+                  const hasAnyData =
+                    (data.delivered || 0) > 0 ||
+                    (data.bounced || 0) > 0 ||
+                    (data.complained || 0) > 0 ||
+                    (data.opened || 0) > 0 ||
+                    (data.clicked || 0) > 0;
+
+                  if (!hasAnyData) return null;
 
                   return (
                     <div className=" bg-background border shadow-lg p-2 rounded-xl flex flex-col gap-2 px-4">
@@ -286,7 +297,7 @@ const DashboardItemCard: React.FC<DashboardItemCardProps> = ({
         <div className="text-foreground font-light text-2xl  font-mono">
           {count}
         </div>
-        {status !== "total" ? (
+        {status !== "total" && isFinite(percentage) ? (
           <div className="text-sm pb-1">
             {count > 0 ? (percentage * 100).toFixed(0) : 0}%
           </div>
@@ -337,7 +348,7 @@ const EmailChartItem: React.FC<DashboardItemCardProps> = ({
         <div className="mt-1 -ml-0.5 ">
           <span className="text-xl font-mono">{count}</span>
           <span className="text-xs ml-2 font-mono">
-            {status !== "total"
+            {status !== "total" && isFinite(percentage)
               ? `(${count > 0 ? (percentage * 100).toFixed(0) : 0}%)`
               : null}
           </span>

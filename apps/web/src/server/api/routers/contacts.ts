@@ -1,4 +1,5 @@
 import { CampaignStatus, Prisma } from "@prisma/client";
+import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 
 import {
@@ -119,15 +120,17 @@ export const contactsRouter = createTRPCRouter({
   addContacts: contactBookProcedure
     .input(
       z.object({
-        contacts: z.array(
-          z.object({
-            email: z.string(),
-            firstName: z.string().optional(),
-            lastName: z.string().optional(),
-            properties: z.record(z.string()).optional(),
-            subscribed: z.boolean().optional(),
-          }),
-        ),
+        contacts: z
+          .array(
+            z.object({
+              email: z.string(),
+              firstName: z.string().optional(),
+              lastName: z.string().optional(),
+              properties: z.record(z.string()).optional(),
+              subscribed: z.boolean().optional(),
+            }),
+          )
+          .max(50000),
       }),
     )
     .mutation(async ({ ctx: { contactBook, team }, input }) => {
@@ -149,14 +152,84 @@ export const contactsRouter = createTRPCRouter({
         subscribed: z.boolean().optional(),
       }),
     )
-    .mutation(async ({ input }) => {
+    .mutation(async ({ ctx: { contactBook, team }, input }) => {
       const { contactId, ...contact } = input;
-      return contactService.updateContact(contactId, contact);
+      const updatedContact = await contactService.updateContactInContactBook(
+        contactId,
+        contactBook.id,
+        contact,
+        team.id,
+      );
+
+      if (!updatedContact) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: "Contact not found",
+        });
+      }
+
+      return updatedContact;
     }),
 
   deleteContact: contactBookProcedure
     .input(z.object({ contactId: z.string() }))
-    .mutation(async ({ input }) => {
-      return contactService.deleteContact(input.contactId);
+    .mutation(async ({ ctx: { contactBook, team }, input }) => {
+      const deletedContact = await contactService.deleteContactInContactBook(
+        input.contactId,
+        contactBook.id,
+        team.id,
+      );
+
+      if (!deletedContact) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: "Contact not found",
+        });
+      }
+
+      return deletedContact;
+    }),
+
+  exportContacts: contactBookProcedure
+    .input(
+      z.object({
+        subscribed: z.boolean().optional(),
+        search: z.string().optional(),
+      }),
+    )
+    .query(async ({ ctx: { db }, input }) => {
+      const whereConditions: Prisma.ContactFindManyArgs["where"] = {
+        contactBookId: input.contactBookId,
+        ...(input.subscribed !== undefined
+          ? { subscribed: input.subscribed }
+          : {}),
+        ...(input.search
+          ? {
+              OR: [
+                { email: { contains: input.search, mode: "insensitive" } },
+                { firstName: { contains: input.search, mode: "insensitive" } },
+                { lastName: { contains: input.search, mode: "insensitive" } },
+              ],
+            }
+          : {}),
+      };
+
+      const contacts = await db.contact.findMany({
+        where: whereConditions,
+        select: {
+          email: true,
+          firstName: true,
+          lastName: true,
+          subscribed: true,
+          unsubscribeReason: true,
+          createdAt: true,
+        },
+        orderBy: {
+          createdAt: "desc",
+        },
+        take: 100000, // Limit to 100k contacts to prevent memory issues
+      });
+
+      return contacts;
     }),
 });

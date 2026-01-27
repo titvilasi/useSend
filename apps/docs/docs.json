@@ -38,7 +38,7 @@
           },
           {
             "group": "Guides",
-            "pages": ["guides/use-with-react-email"]
+            "pages": ["guides/webhooks", "guides/use-with-react-email"]
           },
           {
             "group": "Community SDKs",
@@ -62,6 +62,16 @@
               "api-reference/emails/batch-email",
               "api-reference/emails/update-schedule",
               "api-reference/emails/cancel-schedule"
+            ]
+          },
+          {
+            "group": "Contact Books",
+            "pages": [
+              "api-reference/contacts/list-contact-books",
+              "api-reference/contacts/get-contact-book",
+              "api-reference/contacts/create-contact-book",
+              "api-reference/contacts/update-contact-book",
+              "api-reference/contacts/delete-contact-book"
             ]
           },
           {
@@ -89,6 +99,7 @@
             "group": "Campaigns",
             "pages": [
               "api-reference/campaigns/create-campaign",
+              "api-reference/campaigns/get-campaigns",
               "api-reference/campaigns/get-campaign",
               "api-reference/campaigns/schedule-campaign",
               "api-reference/campaigns/pause-campaign",
