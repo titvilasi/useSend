@@ -31,6 +31,14 @@ export const emailSchema = z
       )
       .max(10) // Limit attachments array size if desired
       .optional(),
+    contactBookId: z.string().optional().openapi({
+      description:
+        "Optional contact book ID to use for contact upsert and unsubscribe URL generation",
+    }),
+    contactBookName: z.string().min(1).optional().openapi({
+      description:
+        "Optional contact book name used when contactBookId is not provided",
+    }),
     scheduledAt: z.string().datetime({ offset: true }).optional(), // Ensure ISO 8601 format with offset
     inReplyToId: z.string().optional().nullable(),
   })

@@ -16,6 +16,8 @@ export type EmailContent = {
   inReplyToId?: string | null;
   sesTenantId?: string | null;
   subscriptionList?: string;
+  contactBookId?: string;
+  contactBookName?: string;
 };
 
 export type EmailAttachment = {

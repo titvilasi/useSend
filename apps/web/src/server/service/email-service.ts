@@ -164,11 +164,35 @@ async function getTemplateRenderDataById(
 const DEFAULT_SUBSCRIPTION_LIST = "default";
 const DEFAULT_CONTACT_BOOK_NAME = "Transactional Contacts";
 
-async function getOrCreateContactBookForList(
-  teamId: number,
-  list?: string
-) {
-  const targetName = list?.trim() || DEFAULT_CONTACT_BOOK_NAME;
+async function resolveContactBookForEmail({
+  teamId,
+  contactBookId,
+  contactBookName,
+}: {
+  teamId: number;
+  contactBookId?: string;
+  contactBookName?: string;
+}) {
+  if (contactBookId) {
+    const contactBook = await db.contactBook.findFirst({
+      where: {
+        id: contactBookId,
+        teamId,
+      },
+    });
+
+    if (!contactBook) {
+      throw new UnsendApiError({
+        code: "BAD_REQUEST",
+        message: "Contact book not found",
+      });
+    }
+
+    return contactBook;
+  }
+
+  const explicitContactBookName = contactBookName?.trim();
+  const targetName = explicitContactBookName || DEFAULT_CONTACT_BOOK_NAME;
 
   const existing = await db.contactBook.findFirst({
     where: { teamId, name: targetName },
@@ -176,6 +200,16 @@ async function getOrCreateContactBookForList(
 
   if (existing) {
     return existing;
+  }
+
+  if (explicitContactBookName) {
+    return db.contactBook.create({
+      data: {
+        name: targetName,
+        teamId,
+        properties: {},
+      },
+    });
   }
 
   const fallback = await db.contactBook.findFirst({
@@ -248,6 +282,8 @@ export async function sendEmail(
     headers,
     unsubUrl: unsubUrlFromApi,
     subscriptionList,
+    contactBookId,
+    contactBookName,
   } = emailContent;
   let subject = subjectFromApiCall;
   let html = htmlFromApiCall;
@@ -297,7 +333,11 @@ export async function sendEmail(
   const bccEmails = bcc ? (Array.isArray(bcc) ? bcc : [bcc]) : [];
 
   if (primaryRecipient) {
-    contactBook = await getOrCreateContactBookForList(teamId, normalizedList);
+    contactBook = await resolveContactBookForEmail({
+      teamId,
+      contactBookId,
+      contactBookName,
+    });
     contact = await getOrCreateContactForEmail(
       contactBook.id,
       primaryRecipient
