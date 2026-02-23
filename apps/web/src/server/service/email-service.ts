@@ -377,6 +377,31 @@ export async function sendEmail(
     (email) => !suppressionResults[email]
   );
 
+  const renderVariables = {
+    ...normalizedVariables,
+    unsubscribeUrl: unsubUrl ?? "",
+    unsunscribeUrl: unsubUrl ?? "",
+  };
+
+  if (templateId) {
+    const template = await db.template.findUnique({
+      where: { id: templateId },
+    });
+
+    if (template) {
+      const templateData = getTemplateRenderData(template);
+      subject = replaceVariables(template.subject || "", renderVariables);
+      html =
+        (await renderTemplateHtml(templateData, renderVariables)) ?? html;
+    }
+  }
+
+  subject = replaceTemplatePlaceholders(subject ?? "", renderVariables);
+
+  if (html) {
+    html = replaceTemplatePlaceholders(html, renderVariables);
+  }
+
   // Only block the email if all TO recipients are suppressed
   if (filteredToEmails.length === 0) {
     logger.info(
@@ -439,31 +464,6 @@ export async function sendEmail(
       },
       "Some BCC recipients were suppressed and filtered out."
     );
-  }
-
-  const renderVariables = {
-    ...normalizedVariables,
-    unsubscribeUrl: unsubUrl ?? "",
-    unsunscribeUrl: unsubUrl ?? "",
-  };
-
-  if (templateId) {
-    const template = await db.template.findUnique({
-      where: { id: templateId },
-    });
-
-    if (template) {
-      const templateData = getTemplateRenderData(template);
-      subject = replaceVariables(template.subject || "", renderVariables);
-      html =
-        (await renderTemplateHtml(templateData, renderVariables)) ?? html;
-    }
-  }
-
-  subject = replaceTemplatePlaceholders(subject ?? "", renderVariables);
-
-  if (html) {
-    html = replaceTemplatePlaceholders(html, renderVariables);
   }
 
   if (inReplyToId) {
@@ -755,6 +755,12 @@ export async function sendBulkEmails(
       }
     }
 
+    subject = replaceTemplatePlaceholders(subject ?? "", normalizedVariables);
+
+    if (html) {
+      html = replaceTemplatePlaceholders(html, normalizedVariables);
+    }
+
     const originalToEmails = Array.isArray(originalContent.to)
       ? originalContent.to
       : [originalContent.to];
@@ -890,6 +896,12 @@ export async function sendBulkEmails(
             (await renderTemplateHtml(templateData, normalizedVariables)) ??
             html;
         }
+      }
+
+      subject = replaceTemplatePlaceholders(subject ?? "", normalizedVariables);
+
+      if (html) {
+        html = replaceTemplatePlaceholders(html, normalizedVariables);
       }
 
       if (!text && !html) {
