@@ -1,4 +1,5 @@
 import { EmailContent } from "~/types";
+import { Prisma } from "@prisma/client";
 import { db } from "../db";
 import { UnsendApiError } from "~/server/public-api/api-error";
 import { EmailQueueService } from "./email-queue-service";
@@ -247,14 +248,38 @@ async function getOrCreateContactForEmail(
     return existing;
   }
 
-  return db.contact.create({
-    data: {
-      contactBookId,
-      email,
-      properties: {},
-      subscribed: true,
-    },
-  });
+  try {
+    return await db.contact.create({
+      data: {
+        contactBookId,
+        email,
+        properties: {},
+        subscribed: true,
+      },
+    });
+  } catch (error) {
+    if (
+      !(error instanceof Prisma.PrismaClientKnownRequestError) ||
+      error.code !== "P2002" ||
+      error.meta?.modelName !== "Contact"
+    ) {
+      throw error;
+    }
+    const target = error.meta?.target;
+    if (
+      !Array.isArray(target) || target.length !== 2 ||
+      !target.includes("contactBookId") || !target.includes("email")
+    ) {
+      throw error;
+    }
+    // A concurrent send can create this contact after our initial lookup.
+    // Reuse its existing subscription and properties without retrying the email.
+    const concurrentContact = await db.contact.findUnique({
+      where: { contactBookId_email: { contactBookId, email } },
+    });
+    if (!concurrentContact) throw error;
+    return concurrentContact;
+  }
 }
 
 /**
