@@ -112,7 +112,6 @@ export async function observeNativeProvider(
         teamId: scope.teamId,
         apiKeyId: key.id,
         tokenHash: key.tokenHash,
-        keyUpdatedAt: key.updatedAt,
         domainId: key.domain.id,
         domain: key.domain.name,
         domainUpdatedAt: key.domain.updatedAt,

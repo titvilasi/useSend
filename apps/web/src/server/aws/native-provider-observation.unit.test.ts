@@ -5,6 +5,8 @@ import {
 } from "@aws-sdk/client-sesv2";
 import { STSClient } from "@aws-sdk/client-sts";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { Prisma } from "@prisma/client";
+import { scryptSync } from "crypto";
 vi.mock("~/env", () => ({
   env: {
     AWS_ACCESS_KEY: "owned-fake",
@@ -14,11 +16,15 @@ vi.mock("~/env", () => ({
 }));
 const { database } = vi.hoisted(() => ({
   database: {
-    apiKey: { findUnique: vi.fn() },
+    apiKey: { findUnique: vi.fn(), update: vi.fn() },
+    team: { findUnique: vi.fn() },
     sesSetting: { findUnique: vi.fn() },
   },
 }));
 vi.mock("../db", () => ({ db: database }));
+vi.mock("~/utils/common", () => ({ isSelfHosted: () => true }));
+vi.mock("../logger/log", () => ({ logger: { info: vi.fn(), error: vi.fn() } }));
+import { getApp } from "../public-api/hono";
 import {
   observeNativeProvider,
   readSesProviderProof,
@@ -166,4 +172,92 @@ describe("scoped fresh evidence cache", () => {
       vi.useRealTimers();
     }
   });
+});
+
+describe("actual Hono authentication telemetry and stable sender authority", () => {
+  it("lastUsed's generated-Prisma updatedAt mutation must not rotate scope or bust the60s SDK cache", async () => {
+    expect(
+      Prisma.dmmf.datamodel.models
+        .find((m) => m.name === "ApiKey")
+        ?.fields.find((f) => f.name === "updatedAt")?.isUpdatedAt,
+    ).toBe(true);
+    const clientId = "ownedAuthId",
+      token = "ownedSyntheticToken",
+      salt = "ownedSalt";
+    const stored = {
+      id: 11,
+      clientId,
+      teamId: 1,
+      tokenHash:
+        salt +
+        ":" +
+        scryptSync(new TextEncoder().encode(token), salt, 64).toString("hex"),
+      updatedAt: new Date("2026-10-28T00:00:00Z"),
+      lastUsed: null as Date | null,
+      domain: {
+        id: 1,
+        teamId: 1,
+        name: "auth-owned.invalid",
+        region: "us-east-1",
+        updatedAt: new Date("2026-10-27T00:00:00Z"),
+      },
+    };
+    database.apiKey.findUnique.mockImplementation(async () => ({ ...stored }));
+    database.team.findUnique.mockResolvedValue({ id: 1, name: "Owned team" });
+    // The mocked DB honors the actual generated @updatedAt contract; Hono/auth/crypto/observer are production functions.
+    database.apiKey.update.mockImplementation(async ({ data }) => {
+      stored.lastUsed = data.lastUsed;
+      stored.updatedAt = new Date(stored.updatedAt.getTime() + 1);
+      return { ...stored };
+    });
+    const app = getApp();
+    app.get("/v1/owned-readiness", async (c) =>
+      c.json(
+        await observeNativeProvider({
+          teamId: c.var.team.id,
+          apiKeyId: c.var.team.apiKeyId,
+        }),
+      ),
+    );
+    const request = () =>
+      app.request("http://localhost/api/v1/owned-readiness", {
+        headers: { Authorization: `Bearer us_${clientId}_${token}` },
+      });
+    const first = await request();
+    expect(first.status).toBe(200);
+    const a = await first.json();
+    const auditTime = stored.updatedAt.getTime();
+    const second = await request();
+    expect(second.status).toBe(200);
+    const b = await second.json();
+    expect(database.apiKey.update).toHaveBeenCalledTimes(2);
+    expect(stored.updatedAt.getTime()).toBeGreaterThan(auditTime);
+    expect(stored.lastUsed).toBeInstanceOf(Date);
+    expect(b.providerScopeFingerprint).toBe(a.providerScopeFingerprint);
+    expect(attempts).toHaveLength(3);
+  });
+});
+
+describe("stable authority still fences real restrictions", () => {
+  it.each(["domain", "region"] as const)(
+    "a real %s restriction change invalidates the cached sender scope",
+    async (field) => {
+      const first = await observeNativeProvider({ teamId: 1, apiKeyId: 11 });
+      const current = await database.apiKey.findUnique();
+      database.apiKey.findUnique.mockResolvedValue({
+        ...current,
+        domain: {
+          ...current.domain,
+          ...(field === "domain"
+            ? { id: 2, name: "changed-owned.invalid" }
+            : { region: "us-west-2" }),
+        },
+      });
+      const changed = await observeNativeProvider({ teamId: 1, apiKeyId: 11 });
+      expect(changed.providerScopeFingerprint).not.toBe(
+        first.providerScopeFingerprint,
+      );
+      expect(attempts).toHaveLength(6);
+    },
+  );
 });
