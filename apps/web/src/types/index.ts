@@ -1,4 +1,5 @@
 export type EmailContent = {
+  purpose?: "service" | "marketing";
   to: string | string[];
   from: string;
   subject?: string;

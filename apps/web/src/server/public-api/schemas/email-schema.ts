@@ -1,11 +1,15 @@
 import { z } from "@hono/zod-openapi";
+import { hasRecipientMailboxes } from "~/server/utils/email-recipients";
 
 /**
  * Reusable Zod schema for a single email payload used in public API requests.
  */
 export const emailSchema = z
   .object({
-    to: z.string().or(z.array(z.string())),
+    to: z.string().or(z.array(z.string())).refine(hasRecipientMailboxes, {
+      message: "To must contain a recipient email address",
+    }),
+    purpose: z.enum(["service", "marketing"]).optional(),
     from: z.string(),
     subject: z.string().min(1).optional().openapi({
       description: "Optional when templateId is provided",
@@ -42,6 +46,10 @@ export const emailSchema = z
     scheduledAt: z.string().datetime({ offset: true }).optional(), // Ensure ISO 8601 format with offset
     inReplyToId: z.string().optional().nullable(),
   })
+  .refine(
+    (data) => data.purpose !== "marketing" || data.scheduledAt === undefined,
+    "Scheduled marketing email is not supported by this endpoint."
+  )
   .refine(
     (data) => !!data.subject || !!data.templateId,
     "Either subject or templateId must be provided."

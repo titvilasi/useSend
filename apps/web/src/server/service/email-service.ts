@@ -11,6 +11,7 @@ import { EmailRenderer } from "@usesend/email-editor/src/renderer";
 import { logger } from "../logger/log";
 import { SuppressionService } from "./suppression-service";
 import { createContactBookUnsubUrl } from "./campaign-service";
+import { hasRecipientMailboxes } from "../utils/email-recipients";
 
 async function checkIfValidEmail(emailId: string) {
   const email = await db.email.findUnique({
@@ -288,6 +289,21 @@ async function getOrCreateContactForEmail(
 export async function sendEmail(
   emailContent: EmailContent & { teamId: number; apiKeyId?: number }
 ) {
+  if (!hasRecipientMailboxes(emailContent.to)) {
+    throw new UnsendApiError({
+      code: "BAD_REQUEST",
+      message: "To must contain a recipient email address",
+    });
+  }
+  if (
+    emailContent.purpose === "marketing" &&
+    emailContent.scheduledAt !== undefined
+  ) {
+    throw new UnsendApiError({
+      code: "BAD_REQUEST",
+      message: "Scheduled marketing email is not supported by this endpoint.",
+    });
+  }
   const {
     to,
     from,
@@ -550,7 +566,7 @@ export async function sendEmail(
       email.id,
       teamId,
       domain.region,
-      true,
+      emailContent.purpose !== "marketing",
       unsubUrl,
       delay
     );
@@ -647,6 +663,12 @@ export async function sendBulkEmails(
     }
   >
 ) {
+  if (emailContents.some((content) => content.purpose === "marketing")) {
+    throw new UnsendApiError({
+      code: "BAD_REQUEST",
+      message: "Marketing email is not supported by the batch endpoint.",
+    });
+  }
   if (emailContents.length === 0) {
     throw new UnsendApiError({
       code: "BAD_REQUEST",

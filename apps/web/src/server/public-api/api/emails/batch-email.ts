@@ -4,6 +4,7 @@ import { sendBulkEmails } from "~/server/service/email-service";
 import { EmailContent } from "~/types";
 import { emailSchema } from "../../schemas/email-schema";
 import { IdempotencyService } from "~/server/service/idempotency-service";
+import { UnsendApiError } from "~/server/public-api/api-error";
 
 // Define the schema for a single email within the bulk request
 // This is similar to the schema in send-email.ts but without the top-level 'required'
@@ -64,6 +65,13 @@ function sendBatch(app: PublicAPIApp) {
   app.openapi(route, async (c) => {
     const team = c.var.team;
     const emailPayloads = c.req.valid("json");
+
+    if (emailPayloads.some((payload) => payload.purpose === "marketing")) {
+      throw new UnsendApiError({
+        code: "BAD_REQUEST",
+        message: "Marketing email is not supported by the batch endpoint.",
+      });
+    }
 
     const normalizedPayloads = emailPayloads.map((payload) => ({
       ...payload,

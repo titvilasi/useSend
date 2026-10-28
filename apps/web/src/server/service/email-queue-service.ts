@@ -125,7 +125,7 @@ export class EmailQueueService {
     if (!queue) {
       throw new Error(`Queue for region ${region} not found`);
     }
-    queue.add(
+    await queue.add(
       emailId,
       {
         emailId,
