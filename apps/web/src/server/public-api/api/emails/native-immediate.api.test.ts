@@ -554,3 +554,167 @@ describe("Native immediate versioned acceptance contract", () => {
     expect(physical).toBe(0);
   });
 });
+
+describe("Native readiness API scope and explicit bootstrap", () => {
+  it("bodyless explicit POST qualification uses authenticated key scope", async () => {
+    const app = getApp();
+    const qualify = vi.fn(async () => ({ qualified: true }));
+    routes.registerNativeMarketing(app, {
+      ...nativeDeps,
+      qualify,
+    } as unknown as Parameters<typeof routes.registerNativeMarketing>[1]);
+    const response = await app.request(
+      "http://localhost/api/v1/native-marketing/qualify",
+      { method: "POST" },
+    );
+    expect(response.status).toBe(200);
+    expect(qualify).toHaveBeenCalledExactlyOnceWith({
+      teamId: 1,
+      apiKeyId: 11,
+    });
+  });
+  it("periodic GET passes authenticated scope and never calls qualification", async () => {
+    const app = getApp();
+    const capabilities = vi.fn(async () => ({
+      qualified: false,
+      reason: "PROVIDER_LEDGER_LOST",
+    }));
+    const qualify = vi.fn();
+    routes.registerNativeMarketing(app, {
+      ...nativeDeps,
+      capabilities,
+      qualify,
+    } as unknown as Parameters<typeof routes.registerNativeMarketing>[1]);
+    const response = await app.request(
+      "http://localhost/api/v1/native-marketing/capabilities",
+    );
+    expect(response.status).toBe(200);
+    expect(capabilities).toHaveBeenCalledExactlyOnceWith({
+      teamId: 1,
+      apiKeyId: 11,
+    });
+    expect(qualify).not.toHaveBeenCalled();
+  });
+});
+
+describe("Native provider reservation integration", () => {
+  it("releases only its own provider reservation on final known no-SDK hold", async () => {
+    const settle = vi.fn(async () => undefined);
+    const validate = vi.fn(async () => {
+      throw new Error("PROVIDER_LEDGER_LOST");
+    });
+    const response = await post(payload, "final-loss", {
+      ...nativeDeps,
+      admission: { ...nativeDeps.admission, settle, validate },
+    });
+    expect(response.status).toBe(429);
+    expect(await response.json()).toMatchObject({
+      sdkInvoked: false,
+      permitConsumed: false,
+      reason: "PROVIDER_LEDGER_LOST",
+    });
+    expect(physical).toBe(0);
+    expect(settle).toHaveBeenCalledWith(
+      expect.objectContaining({ permitId: "provider-permit" }),
+      "unused",
+    );
+  });
+  it("preserves UNKNOWN reservation after ambiguous SDK result and never auto-retries", async () => {
+    const settle = vi.fn(async () => undefined);
+    missingSdkId = true;
+    const overrides = {
+      ...nativeDeps,
+      admission: { ...nativeDeps.admission, settle },
+    };
+    expect((await post(payload, "sdk-ambiguous", overrides)).status).toBe(503);
+    expect(settle).toHaveBeenCalledWith(expect.anything(), "unknown");
+    requestPermit = "fresh-request";
+    expect((await post(payload, "sdk-ambiguous", overrides)).status).toBe(503);
+    expect(physical).toBe(1);
+    expect(settle).toHaveBeenCalledTimes(1);
+  });
+  it("known SES quota rejection releases provider quota while Native physical permit remains spent", async () => {
+    const settle = vi.fn(async () => undefined);
+    sdkFailure = new TooManyRequestsException({
+      message: "Owned quota fake",
+      $metadata: {},
+    });
+    const response = await post(payload, "known-quota", {
+      ...nativeDeps,
+      admission: { ...nativeDeps.admission, settle },
+    });
+    expect(response.status).toBe(429);
+    expect(await response.json()).toMatchObject({
+      sdkInvoked: true,
+      permitConsumed: true,
+    });
+    expect(settle).toHaveBeenCalledWith(expect.anything(), "unused");
+  });
+  it("settles known accepted reservation without changing the durable acceptance receipt", async () => {
+    const settle = vi.fn(async () => undefined);
+    const response = await post(payload, "accepted-ledger", {
+      ...nativeDeps,
+      admission: { ...nativeDeps.admission, settle },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      outcome: "accepted",
+      sdkInvoked: true,
+      permitConsumed: true,
+    });
+    expect(settle).toHaveBeenCalledWith(expect.anything(), "accepted");
+  });
+});
+
+describe("final consent after provider wait", () => {
+  it("an unsubscribe committed during final provider validation prevents SDK submission", async () => {
+    const settle = vi.fn(async () => undefined);
+    const validate = vi.fn(async () => {
+      database.contact.findUnique.mockResolvedValue({
+        id: "contact_owned",
+        email: payload.to,
+        subscribed: false,
+        contactBookId: "book_owned",
+        contactBook: { teamId: 1 },
+      });
+    });
+    const response = await post(payload, "unsubscribe-provider-wait", {
+      ...nativeDeps,
+      admission: { ...nativeDeps.admission, validate, settle },
+    });
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({
+      outcome: "suppressed",
+      sdkInvoked: false,
+      permitConsumed: false,
+    });
+    expect(physical).toBe(0);
+    expect(settle).toHaveBeenCalledWith(expect.anything(), "unused");
+  });
+});
+
+it("keeps current submission UNKNOWN when durable shared rejection invalidation fails", async () => {
+  const invalidate = vi.fn(async () => {
+    throw new Error("lost DB acknowledgement");
+  });
+  const settle = vi.fn(async () => undefined);
+  sdkFailure = new TooManyRequestsException({
+    message: "Owned quota fake",
+    $metadata: {},
+  });
+  const response = await post(payload, "invalidation-unknown", {
+    ...nativeDeps,
+    admission: { ...nativeDeps.admission, invalidate, settle },
+  });
+  expect(response.status).toBe(503);
+  expect(await response.json()).toMatchObject({
+    outcome: "unknown",
+    sdkInvoked: true,
+    permitConsumed: true,
+  });
+  expect(invalidate).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ accountId: "owned-account" }),
+    expect.any(Number),
+  );
+  expect(settle).toHaveBeenCalledWith(expect.anything(), "unknown");
+});

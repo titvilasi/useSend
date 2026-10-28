@@ -32,6 +32,11 @@ import {
   transitionMarketingControl,
 } from "./marketing-handoff";
 
+import {
+  nativeProviderReadiness,
+  requireAdmissionPermit,
+} from "./native-provider-runtime";
+
 export interface NativeReply {
   protocol: typeof NATIVE_PROTOCOL;
   intentId: string;
@@ -69,6 +74,9 @@ export interface ProviderPermit {
   envelopeDigest: string;
   observationGeneration: number;
   permitId: string;
+  ledgerEpoch?: string;
+  observationHash?: string;
+  senderScopeFingerprint?: string;
 }
 export interface NativeDependencies {
   database: typeof db;
@@ -76,7 +84,22 @@ export interface NativeDependencies {
   send: typeof sendRawEmail;
   admission: {
     qualified: boolean;
+    invalidate?: (permit: ProviderPermit, until: number) => Promise<void>;
+    preflight?: (scope: {
+      teamId: number;
+      apiKeyId?: number;
+    }) => Promise<{ qualified: boolean; reason?: string }>;
+    validate?: (
+      scope: { teamId: number; apiKeyId?: number },
+      permit: ProviderPermit,
+    ) => Promise<void>;
+    settle?: (
+      permit: ProviderPermit,
+      effect: "unused" | "accepted" | "unknown",
+    ) => Promise<void>;
     acquire: (input: {
+      teamId: number;
+      apiKeyId?: number;
       controlId: string;
       revision: number;
       region: string;
@@ -93,7 +116,14 @@ export interface NativeDependencies {
   ) => Promise<void>;
   configurationSet: typeof getConfigurationSetName;
   checkTeamLimit: (teamId: number) => Promise<{ isLimitReached: boolean }>;
-  capabilities: () => Promise<{ qualified: boolean; [key: string]: unknown }>;
+  capabilities: (scope: {
+    teamId: number;
+    apiKeyId?: number;
+  }) => Promise<{ qualified: boolean; [key: string]: unknown }>;
+  qualify?: (scope: {
+    teamId: number;
+    apiKeyId?: number;
+  }) => Promise<{ qualified: boolean; [key: string]: unknown }>;
   senderScope: (scope: {
     teamId: number;
     apiKeyId?: number;
@@ -106,13 +136,33 @@ const live: NativeDependencies = {
   database: db,
   now: () => new Date(),
   send: sendRawEmail,
-  senderScope: async () => null,
+  senderScope: async (scope) => {
+    const result = await nativeProviderReadiness.capabilities(scope);
+    return result.qualified ? result.providerScopeFingerprint : null;
+  },
   admission: {
-    qualified: false,
-    acquire: async () => ({
-      kind: "hold",
-      reason: "PROVIDER_ADMISSION_UNQUALIFIED",
-    }),
+    qualified: true,
+    invalidate: (permit, until) =>
+      nativeProviderReadiness.invalidate(
+        requireAdmissionPermit({ ...permit }),
+        until,
+      ),
+    preflight: (scope) => nativeProviderReadiness.capabilities(scope),
+    acquire: (input) =>
+      nativeProviderReadiness.acquire(
+        { teamId: input.teamId, apiKeyId: input.apiKeyId },
+        input,
+      ),
+    validate: (scope, permit) =>
+      nativeProviderReadiness.validate(
+        scope,
+        requireAdmissionPermit({ ...permit }),
+      ),
+    settle: (permit, effect) =>
+      nativeProviderReadiness.settle(
+        requireAdmissionPermit({ ...permit }),
+        effect,
+      ),
   },
   getAccountPause: async (account, region) => {
     const raw = await getRedis().get(pauseKey(account, region));
@@ -131,17 +181,15 @@ const live: NativeDependencies = {
   },
   configurationSet: getConfigurationSetName,
   checkTeamLimit: (id) => LimitService.checkEmailLimit(id),
-  capabilities: async () => ({
-    protocol: NATIVE_PROTOCOL,
-    qualified: false,
-    reason: "PROVIDER_ADMISSION_UNQUALIFIED",
-  }),
+  capabilities: (scope) => nativeProviderReadiness.capabilities(scope),
+  qualify: (scope) => nativeProviderReadiness.qualify(scope),
 };
 export async function nativeMarketingCapabilities(
   overrides: Partial<NativeDependencies> = {},
+  scope: { teamId: number; apiKeyId?: number } = { teamId: 0 },
 ) {
   return {
-    ...(await (overrides.capabilities ?? live.capabilities)()),
+    ...(await (overrides.capabilities ?? live.capabilities)(scope)),
     protocol: NATIVE_PROTOCOL,
   };
 }
@@ -247,6 +295,13 @@ export async function submitNativeMarketing(
             throw new MarketingNoSend("NATIVE_SUBMIT_WINDOW_ELAPSED");
           if (!deps.admission.qualified)
             throw new MarketingNoSend("PROVIDER_ADMISSION_UNQUALIFIED");
+          if (deps.admission.preflight) {
+            const ready = await deps.admission.preflight(context);
+            if (!ready.qualified)
+              throw new MarketingNoSend(
+                ready.reason ?? "PROVIDER_ADMISSION_UNQUALIFIED",
+              );
+          }
         },
       },
     );
@@ -314,6 +369,7 @@ export async function executePreparedNative(
   let fencedHere = false;
   let observedId: string | undefined;
   let providerPermit: ProviderPermit | undefined;
+  let providerEffect: "unused" | "accepted" | "unknown" | undefined;
   const result = (
     outcome: NativeReply["outcome"],
     status: NativeResult["status"],
@@ -482,6 +538,8 @@ export async function executePreparedNative(
             );
           checkDeadlines();
           const admission = await deps.admission.acquire({
+            teamId: email.teamId,
+            apiKeyId: context.apiKeyId,
             controlId: record.id,
             revision: record.data.revision,
             region: domain.region,
@@ -491,6 +549,7 @@ export async function executePreparedNative(
           });
           if (admission.kind === "hold")
             throw new MarketingNoSend(admission.reason);
+          providerPermit = admission;
           if (
             !admission.accountId ||
             !admission.permitId ||
@@ -515,7 +574,6 @@ export async function executePreparedNative(
             )) > deps.now().getTime()
           )
             throw new MarketingNoSend("PROVIDER_ACCOUNT_PAUSED");
-          providerPermit = admission;
           const fenced = await fenceNativePermit(
             record,
             permit,
@@ -533,6 +591,29 @@ export async function executePreparedNative(
           record = fenced.record;
           entry = fenced.permit;
           fencedHere = true;
+          if (permit.senderScope !== undefined) {
+            const scope = await deps.senderScope({
+              teamId: email.teamId,
+              apiKeyId: context.apiKeyId,
+              domainId: domain.id,
+            });
+            if (!scope || scope !== permit.senderScope)
+              throw new MarketingNoSend("SENDER_SCOPE_CHANGED");
+          }
+          if (deps.admission.validate) {
+            try {
+              await deps.admission.validate(
+                { teamId: email.teamId, apiKeyId: context.apiKeyId },
+                admission,
+              );
+            } catch (error) {
+              throw new MarketingNoSend(
+                error instanceof Error
+                  ? error.message
+                  : "PROVIDER_VALIDATION_UNAVAILABLE",
+              );
+            }
+          }
           const mailbox = envelope.to[0]!.toLowerCase().trim();
           const contact = email.contactId
             ? await deps.database.contact.findUnique({
@@ -561,15 +642,6 @@ export async function executePreparedNative(
           });
           if (suppression || !authority.subscribed)
             throw new MarketingNoSend("EMAIL_SUPPRESSED", "SUPPRESSED");
-          if (permit.senderScope !== undefined) {
-            const scope = await deps.senderScope({
-              teamId: email.teamId,
-              apiKeyId: context.apiKeyId,
-              domainId: domain.id,
-            });
-            if (!scope || scope !== permit.senderScope)
-              throw new MarketingNoSend("SENDER_SCOPE_CHANGED");
-          }
           checkDeadlines();
         },
       },
@@ -601,6 +673,7 @@ export async function executePreparedNative(
         throw new MarketingHandoffUnknown(email.id);
       record = next;
     });
+    providerEffect = "accepted";
     entry = await readNativePermit(email.teamId, permit, deps.database);
     return accepted(false);
   } catch (error) {
@@ -636,16 +709,22 @@ export async function executePreparedNative(
         providerPermit
       ) {
         const until = deps.now().getTime() + 30000;
+        let accountInvalidated = true;
         try {
+          await deps.admission.invalidate?.(providerPermit, until);
           await deps.pauseAccount(
             providerPermit.accountId,
             providerPermit.region,
             until,
           );
         } catch {
-          /* Provider admission also fails closed on Redis loss. */
+          accountInvalidated = false;
+          /* The current owner stays UNKNOWN if durable account invalidation is uncertain. */
         }
         try {
+          if (!accountInvalidated)
+            throw new Error("PROVIDER_INVALIDATION_UNKNOWN");
+          providerEffect = "unused";
           await deps.database.$transaction(async (tx) => {
             const waiting = await transitionMarketingControl(
               record,
@@ -683,6 +762,7 @@ export async function executePreparedNative(
         (error instanceof BadRequestException ||
           error instanceof MessageRejected)
       ) {
+        providerEffect = "unused";
         try {
           await terminal(
             record,
@@ -776,5 +856,26 @@ export async function executePreparedNative(
         reason: "PRE_SUBMIT_PERSISTENCE_UNKNOWN",
       });
     }
+  } finally {
+    if (providerPermit && deps.admission.settle) {
+      try {
+        await deps.admission.settle(
+          providerPermit,
+          providerEffect ?? (sdkInvoked || observedId ? "unknown" : "unused"),
+        );
+      } catch {
+        /* Pending reservation and hash mismatch remain closed; no lease reclaim. */
+      }
+    }
   }
+}
+
+export async function qualifyNativeMarketing(
+  scope: { teamId: number; apiKeyId?: number },
+  overrides: Partial<NativeDependencies> = {},
+) {
+  return {
+    ...(await (overrides.qualify ?? live.qualify!)(scope)),
+    protocol: NATIVE_PROTOCOL,
+  };
 }
