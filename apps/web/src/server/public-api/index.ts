@@ -1,6 +1,6 @@
 import { getApp } from "./hono";
 import getDomains from "./api/domains/get-domains";
-import sendEmail from "./api/emails/send-email";
+import sendEmail, { registerNativeMarketing } from "./api/emails/send-email";
 import getEmail from "./api/emails/get-email";
 import listEmails from "./api/emails/list-emails";
 import addContact from "./api/contacts/add-contact";
@@ -41,6 +41,7 @@ deleteDomain(app);
 getEmail(app);
 listEmails(app);
 sendEmail(app);
+registerNativeMarketing(app);
 sendBatch(app);
 updateEmailScheduledAt(app);
 cancelScheduledEmail(app);

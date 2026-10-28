@@ -14,12 +14,17 @@ import {
   DeleteSuppressedDestinationCommand,
 } from "@aws-sdk/client-sesv2";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
-import { generateKeyPairSync } from "crypto";
+import { createHash, generateKeyPairSync } from "crypto";
 import nodemailer from "nodemailer";
+import addressparser from "nodemailer/lib/addressparser";
 import { env } from "~/env";
 import { EmailContent } from "~/types";
 import { logger } from "../logger/log";
 import { buildHeaders } from "~/server/utils/email-headers";
+import { MarketingNoSend } from "../service/marketing-handoff";
+
+export interface PreparedMarketingEnvelope { to: string[]; cc: string[]; bcc: string[]; recipientCount: number; digest: string }
+export interface MarketingSesBoundary { expiresAt: string | null; submitBefore: string; now: () => Date; beforeSubmit: (envelope: PreparedMarketingEnvelope) => Promise<void>; onSdkInvocation: () => void }
 
 let accountId: string | undefined = undefined;
 
@@ -46,7 +51,7 @@ async function getIdentityArn(domain: string, region: string) {
   return `arn:aws:ses:${region}:${accountId}:identity/${domain}`;
 }
 
-function getSesClient(region: string) {
+function getSesClient(region: string, marketing = false) {
   return new SESv2Client({
     region: region,
     endpoint: env.AWS_SES_ENDPOINT,
@@ -54,6 +59,7 @@ function getSesClient(region: string) {
       accessKeyId: env.AWS_ACCESS_KEY,
       secretAccessKey: env.AWS_SECRET_KEY,
     },
+    ...(marketing ? { maxAttempts: 1 } : {}),
   });
 }
 
@@ -203,6 +209,7 @@ export async function sendRawEmail({
   emailId,
   sesTenantId,
   headers,
+  marketing,
 }: Partial<EmailContent> & {
   region: string;
   configurationSetName: string;
@@ -215,10 +222,11 @@ export async function sendRawEmail({
   isBulk?: boolean;
   inReplyToMessageId?: string;
   emailId?: string;
+  marketing?: MarketingSesBoundary;
 }) {
-  const sesClient = getSesClient(region);
+  const sesClient = getSesClient(region, Boolean(marketing));
 
-  const { message: messageStream } = await nodemailer
+  const { message: messageStream, envelope } = await nodemailer
     .createTransport({ streamTransport: true })
     .sendMail({
       from,
@@ -257,7 +265,18 @@ export async function sendRawEmail({
     },
     ConfigurationSetName: configurationSetName,
     TenantName: sesTenantId ? sesTenantId : undefined,
+    ...(marketing ? { Destination: { ToAddresses: envelope.to } } : {}),
   });
+
+  if (marketing) {
+    const parse = (values?: string[]) => (values ?? []).flatMap((value) => addressparser(value, { flatten: true }).map(({ address }) => address));
+    const mailboxes = { to: parse(to), cc: parse(cc), bcc: parse(bcc) };
+    if (mailboxes.to.length !== 1 || mailboxes.cc.length !== 0 || mailboxes.bcc.length !== 0 || envelope.to.length !== 1 || envelope.to[0] !== mailboxes.to[0]) throw new MarketingNoSend("MARKETING_SINGLE_RECIPIENT_REQUIRED", "REJECTED");
+    await marketing.beforeSubmit({ ...mailboxes, recipientCount: envelope.to.length, digest: createHash("sha256").update(finalMessageData).update(JSON.stringify(envelope)).digest("hex") });
+    if (marketing.expiresAt !== null && Date.parse(marketing.expiresAt) <= marketing.now().getTime()) throw new MarketingNoSend("DELIVERY_DEADLINE_ELAPSED", "EXPIRED");
+    if (!Number.isFinite(Date.parse(marketing.submitBefore)) || Date.parse(marketing.submitBefore) <= marketing.now().getTime()) throw new MarketingNoSend("NATIVE_SUBMIT_WINDOW_ELAPSED");
+    marketing.onSdkInvocation();
+  }
 
   try {
     const response = await sesClient.send(command);

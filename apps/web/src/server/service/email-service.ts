@@ -12,6 +12,7 @@ import { logger } from "../logger/log";
 import { SuppressionService } from "./suppression-service";
 import { createContactBookUnsubUrl } from "./campaign-service";
 import { hasRecipientMailboxes } from "../utils/email-recipients";
+import { createMarketingOwner, existingMarketingOwner, MarketingHandoffContext, MarketingNoSend, resolveMarketingOwner, singleMarketingMailbox, validateMarketingHandoff } from "./marketing-handoff";
 
 async function checkIfValidEmail(emailId: string) {
   const email = await db.email.findUnique({
@@ -287,7 +288,8 @@ async function getOrCreateContactForEmail(
  Send transactional email
  */
 export async function sendEmail(
-  emailContent: EmailContent & { teamId: number; apiKeyId?: number }
+  emailContent: EmailContent & { teamId: number; apiKeyId?: number },
+  marketingContext?: MarketingHandoffContext
 ) {
   if (!hasRecipientMailboxes(emailContent.to)) {
     throw new UnsendApiError({
@@ -304,6 +306,7 @@ export async function sendEmail(
       message: "Scheduled marketing email is not supported by this endpoint.",
     });
   }
+  const handoff = marketingContext !== undefined ? validateMarketingHandoff(emailContent, marketingContext) : null;
   const {
     to,
     from,
@@ -332,7 +335,7 @@ export async function sendEmail(
   let domain: Awaited<ReturnType<typeof validateDomainFromEmail>>;
   const normalizedVariables = normalizeTemplateVariables(variables);
   const normalizedList = subscriptionList?.trim() || DEFAULT_SUBSCRIPTION_LIST;
-  const primaryRecipient = Array.isArray(to) ? to[0] : to;
+  const primaryRecipient = handoff ? singleMarketingMailbox(emailContent)!.toLowerCase().trim() : Array.isArray(to) ? to[0] : to;
 
   let contactBook:
     | {
@@ -368,6 +371,12 @@ export async function sendEmail(
     domain = await validateDomainFromEmail(from, teamId);
   }
 
+  if (handoff) {
+    const owner = await existingMarketingOwner(teamId, handoff);
+    if (owner) return resolveMarketingOwner(owner);
+    await handoff.beforePrepare?.(domain.region);
+  }
+
   // Check for suppressed emails before sending
   const toEmails = Array.isArray(to) ? to : [to];
   const ccEmails = cc ? (Array.isArray(cc) ? cc : [cc]) : [];
@@ -379,10 +388,10 @@ export async function sendEmail(
       contactBookId,
       contactBookName,
     });
-    contact = await getOrCreateContactForEmail(
-      contactBook.id,
-      primaryRecipient
-    );
+    contact = handoff
+      ? await db.contact.findUnique({ where: { contactBookId_email: { contactBookId: contactBook.id, email: primaryRecipient } } })
+      : await getOrCreateContactForEmail(contactBook.id, primaryRecipient);
+    if (!contact) throw new MarketingNoSend("CANONICAL_CONTACT_REQUIRED");
 
     if (!unsubUrl) {
       unsubUrl = createContactBookUnsubUrl({
@@ -398,13 +407,15 @@ export async function sendEmail(
     ...new Set([...toEmails, ...ccEmails, ...bccEmails]),
   ];
 
-  const suppressionResults = await SuppressionService.checkMultipleEmails(
-    allEmailsToCheck,
-    teamId
-  );
+  const suppressionResults = handoff
+    ? { [primaryRecipient!]: Boolean(await db.suppressionList.findUnique({ where: { teamId_email: { teamId, email: primaryRecipient! } } })) }
+    : await SuppressionService.checkMultipleEmails(allEmailsToCheck, teamId);
 
   if (contact && primaryRecipient && !contact.subscribed) {
     suppressionResults[primaryRecipient] = true;
+  }
+  if (handoff && suppressionResults[primaryRecipient!]) {
+    for (const rawRecipient of toEmails) suppressionResults[rawRecipient] = true;
   }
 
   // Filter each field separately
@@ -453,8 +464,7 @@ export async function sendEmail(
       "All TO recipients are suppressed. No emails to send."
     );
 
-    const email = await db.email.create({
-      data: {
+    const data: Prisma.EmailUncheckedCreateInput = {
         to: toEmails,
         from,
         subject: subject as string,
@@ -467,8 +477,10 @@ export async function sendEmail(
         cc: ccEmails.length > 0 ? ccEmails : undefined,
         bcc: bccEmails.length > 0 ? bccEmails : undefined,
         inReplyToId,
-      },
-    });
+      };
+    const owned = handoff ? await createMarketingOwner(data, domain.region, handoff.expiresAt, { ...handoff, unsubscribeUrl: unsubUrl }) : null;
+    if (owned && !owned.created) return resolveMarketingOwner(owned.record);
+    const email = owned?.email ?? await db.email.create({ data });
 
     await db.emailEvent.create({
       data: {
@@ -535,8 +547,7 @@ export async function sendEmail(
     ? Math.max(0, scheduledAtDate.getTime() - Date.now())
     : undefined;
 
-  const email = await db.email.create({
-    data: {
+  const data: Prisma.EmailUncheckedCreateInput = {
       to: filteredToEmails,
       from,
       subject: subject as string,
@@ -558,8 +569,14 @@ export async function sendEmail(
       inReplyToId,
       headers: headers ? JSON.stringify(headers) : undefined,
       contactId: contact?.id,
-    },
-  });
+    };
+  const owned = handoff ? await createMarketingOwner(data, domain.region, handoff.expiresAt, { ...handoff, unsubscribeUrl: unsubUrl }) : null;
+  if (owned && !owned.created) return resolveMarketingOwner(owned.record);
+  const email = owned?.email ?? await db.email.create({ data });
+
+  if (owned) {
+    return email;
+  }
 
   try {
     await EmailQueueService.queueEmail(

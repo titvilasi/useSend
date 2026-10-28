@@ -309,6 +309,8 @@ export class EmailQueueService {
 }
 
 async function executeEmail(job: QueueEmailJob) {
+  // Unreleased marked-Bull protocol is closed; Native marketing uses the immediate endpoint.
+  if (Object.prototype.hasOwnProperty.call(job.data, "marketingDispatch")) return;
   logger.info(
     { emailId: job.data.emailId, elapsed: Date.now() - job.data.timestamp },
     `[EmailQueueService]: Executing email job`

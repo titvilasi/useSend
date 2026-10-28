@@ -1,5 +1,6 @@
 export type EmailContent = {
   purpose?: "service" | "marketing";
+  expiresAt?: string | null;
   to: string | string[];
   from: string;
   subject?: string;
